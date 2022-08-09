@@ -63,6 +63,8 @@ PncMap::PncMap(const HDMap *hdmap) : hdmap_(hdmap) {}
 
 const hdmap::HDMap *PncMap::hdmap() const { return hdmap_; }
 
+
+//waypint转换为lanewaypoint
 LaneWaypoint PncMap::ToLaneWaypoint(
     const routing::LaneWaypoint &waypoint) const {
   auto lane = hdmap_->GetLaneById(hdmap::MakeMapId(waypoint.id()));
@@ -70,13 +72,16 @@ LaneWaypoint PncMap::ToLaneWaypoint(
   return LaneWaypoint(lane, waypoint.s());
 }
 
+//求取前向距离
 double PncMap::LookForwardDistance(double velocity) {
+  //时间（8秒）*车速
   auto forward_distance = velocity * FLAGS_look_forward_time_sec;
-
+  //最大不超过180m
   return forward_distance > FLAGS_look_forward_short_distance
              ? FLAGS_look_forward_long_distance
              : FLAGS_look_forward_short_distance;
 }
+
 
 LaneSegment PncMap::ToLaneSegment(const routing::LaneSegment &segment) const {
   auto lane = hdmap_->GetLaneById(hdmap::MakeMapId(segment.id()));
@@ -84,15 +89,19 @@ LaneSegment PncMap::ToLaneSegment(const routing::LaneSegment &segment) const {
   return LaneSegment(lane, segment.start_s(), segment.end_s());
 }
 
+//更新下个RoutingWaypoint序号
 void PncMap::UpdateNextRoutingWaypointIndex(int cur_index) {
+  //如果是起始点-1，则下个点next_routing_waypoint_index_=0
   if (cur_index < 0) {
     next_routing_waypoint_index_ = 0;
     return;
   }
+  //如果大于route_indices_的数量，则返回最大点
   if (cur_index >= static_cast<int>(route_indices_.size())) {
     next_routing_waypoint_index_ = routing_waypoint_index_.size() - 1;
     return;
   }
+  //如果是倒车，则往后寻找
   // Search backwards when the car is driven backward on the route.
   while (next_routing_waypoint_index_ != 0 &&
          next_routing_waypoint_index_ < routing_waypoint_index_.size() &&
@@ -108,6 +117,7 @@ void PncMap::UpdateNextRoutingWaypointIndex(int cur_index) {
              routing_waypoint_index_[next_routing_waypoint_index_].waypoint.s) {
     --next_routing_waypoint_index_;
   }
+  //如果是前进，则向前搜索
   // Search forwards
   while (next_routing_waypoint_index_ < routing_waypoint_index_.size() &&
          routing_waypoint_index_[next_routing_waypoint_index_].index <
@@ -121,6 +131,7 @@ void PncMap::UpdateNextRoutingWaypointIndex(int cur_index) {
              routing_waypoint_index_[next_routing_waypoint_index_].waypoint.s) {
     ++next_routing_waypoint_index_;
   }
+  //如果超过范围，则返回最大值
   if (next_routing_waypoint_index_ >= routing_waypoint_index_.size()) {
     next_routing_waypoint_index_ = routing_waypoint_index_.size() - 1;
   }
@@ -132,6 +143,7 @@ std::vector<routing::LaneWaypoint> PncMap::FutureRouteWaypoints() const {
       waypoints.begin() + next_routing_waypoint_index_, waypoints.end());
 }
 
+//完成对rang_lane_ids_de 更新，以及起始range_start_，结束点range_end_进行更新
 void PncMap::UpdateRoutingRange(int adc_index) {
   // Track routing range.
   range_lane_ids_.clear();
@@ -197,6 +209,7 @@ bool PncMap::UpdateVehicleState(const VehicleState &vehicle_state) {
   return true;
 }
 
+//是否是新的routing，判断新的routing和之前存储的routing进行对比
 bool PncMap::IsNewRouting(const routing::RoutingResponse &routing) const {
   return IsNewRouting(routing_, routing);
 }
@@ -207,13 +220,18 @@ bool PncMap::IsNewRouting(const routing::RoutingResponse &prev,
     ADEBUG << "The provided routing is invalid.";
     return false;
   }
+  //用proto是否相同来判断
   return !common::util::IsProtoEqual(prev, routing);
 }
 
+
+//对routing信息进行更新
 bool PncMap::UpdateRoutingResponse(const routing::RoutingResponse &routing) {
+  //清除range_lane_ids_，route_indices_，all_lane_ids_三个成员变量的内容
   range_lane_ids_.clear();
   route_indices_.clear();
   all_lane_ids_.clear();
+  //遍历所有的road和segement，和passage
   for (int road_index = 0; road_index < routing.road_size(); ++road_index) {
     const auto &road_segment = routing.road(road_index);
     for (int passage_index = 0; passage_index < road_segment.passage_size();
@@ -247,6 +265,7 @@ bool PncMap::UpdateRoutingResponse(const routing::RoutingResponse &routing) {
     return false;
   }
   int i = 0;
+  //遍历，寻找在waypoints和route_indices_，更新routing_waypoint_index_
   for (size_t j = 0; j < route_indices_.size(); ++j) {
     while (i < request_waypoints.size() &&
            RouteSegments::WithinLaneSegment(route_indices_[j].segment,
@@ -268,17 +287,22 @@ const routing::RoutingResponse &PncMap::routing_response() const {
   return routing_;
 }
 
+
+//判断routing是否有效
 bool PncMap::ValidateRouting(const RoutingResponse &routing) {
+  //确认routing中道路的数量，如果等于0，则返回无效
   const int num_road = routing.road_size();
   if (num_road == 0) {
     AERROR << "Route is empty.";
     return false;
   }
+  //如果routing点数量小于2，则返回无效
   if (!routing.has_routing_request() ||
       routing.routing_request().waypoint_size() < 2) {
     AERROR << "Routing does not have request.";
     return false;
   }
+  //进一步确认waypoint的信息是否有效，wapypint是否包含有效id，是否包含s信息
   for (const auto &waypoint : routing.routing_request().waypoint()) {
     if (!waypoint.has_id() || !waypoint.has_s()) {
       AERROR << "Routing waypoint has no lane_id or s.";
@@ -288,6 +312,7 @@ bool PncMap::ValidateRouting(const RoutingResponse &routing) {
   return true;
 }
 
+//前向搜索index
 int PncMap::SearchForwardWaypointIndex(int start,
                                        const LaneWaypoint &waypoint) const {
   int i = std::max(start, 0);
@@ -299,6 +324,7 @@ int PncMap::SearchForwardWaypointIndex(int start,
   return i;
 }
 
+//后向搜索index
 int PncMap::SearchBackwardWaypointIndex(int start,
                                         const LaneWaypoint &waypoint) const {
   int i = std::min(static_cast<int>(route_indices_.size() - 1), start);
@@ -319,7 +345,9 @@ int PncMap::NextWaypointIndex(int index) const {
   }
 }
 
+
 int PncMap::GetWaypointIndex(const LaneWaypoint &waypoint) const {
+  //根据车辆所在位置，确认其在rout point的序号
   int forward_index = SearchForwardWaypointIndex(adc_route_index_, waypoint);
   if (forward_index >= static_cast<int>(route_indices_.size())) {
     return SearchBackwardWaypointIndex(adc_route_index_, waypoint);
@@ -341,12 +369,15 @@ bool PncMap::PassageToSegments(routing::Passage passage,
                                RouteSegments *segments) const {
   CHECK_NOTNULL(segments);
   segments->clear();
+  //遍历passage中所有的segment
   for (const auto &lane : passage.segment()) {
+    //根据id获取对应的指针
     auto lane_ptr = hdmap_->GetLaneById(hdmap::MakeMapId(lane.id()));
     if (!lane_ptr) {
       AERROR << "Failed to find lane: " << lane.id();
       return false;
     }
+    //定义起始s和结束s
     segments->emplace_back(lane_ptr, std::max(0.0, lane.start_s()),
                            std::min(lane_ptr->total_length(), lane.end_s()));
   }
@@ -536,11 +567,12 @@ bool PncMap::GetNearestPointFromRouting(const VehicleState &state,
   }
   //
   std::vector<LaneInfoConstPtr> valid_lanes;
-  //lambda
+  //lambda，将在range_lane_ids_的id赋值到valid_lanes里
   std::copy_if(lanes.begin(), lanes.end(), std::back_inserter(valid_lanes),
                [&](LaneInfoConstPtr ptr) {
                  return range_lane_ids_.count(ptr->lane().id().id()) > 0;
                });
+  //如果valid_lanes为空，将在all_lane_ids_的id赋值到valid_lanes里
   if (valid_lanes.empty()) {
     std::copy_if(lanes.begin(), lanes.end(), std::back_inserter(valid_lanes),
                  [&](LaneInfoConstPtr ptr) {
